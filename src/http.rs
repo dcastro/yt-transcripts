@@ -157,7 +157,7 @@ mod tests {
 
     use reqwest::{StatusCode, Url};
 
-    use super::{check, parse_retry_after};
+    use super::{HttpClient, check, parse_retry_after};
     use crate::error::FetchError;
 
     fn url(text: &str) -> Url {
@@ -225,6 +225,28 @@ mod tests {
                 .body,
             "fine"
         );
+    }
+
+    #[test]
+    fn requests_go_through_the_proxy() {
+        let mut proxy = mockito::Server::new();
+        let mock = proxy
+            .mock("GET", "/watch")
+            .match_query(mockito::Matcher::Any)
+            .match_header("host", "youtube.invalid")
+            .with_body("from the proxy")
+            .create();
+        let client = HttpClient::new(Some(&proxy.url())).unwrap();
+        // The host does not exist. Only the proxy can answer.
+        let response = client.get("http://youtube.invalid/watch?v=x").unwrap();
+        assert_eq!(response.body, "from the proxy");
+        mock.assert();
+    }
+
+    #[test]
+    fn rejects_a_bad_proxy_url() {
+        let error = HttpClient::new(Some("not a url")).err().unwrap();
+        assert!(error.to_string().starts_with("the proxy URL is not valid"));
     }
 
     #[test]

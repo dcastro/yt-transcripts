@@ -19,13 +19,13 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::channel::{ChannelListing, ChannelRef, ListError};
-use crate::cli::Cli;
+use crate::cli::{Backend, Cli};
 use crate::http::HttpClient;
 use crate::model::Video;
 use crate::run::{Runner, Settings, Stop};
 use crate::store::{Manifest, Status, Store};
 use crate::throttle::{MAX_UNEXPECTED_IN_SEQUENCE, RealSleeper, Throttle, ThrottleSettings};
-use crate::transcript::Innertube;
+use crate::transcript::{Innertube, TrackSource, YtDlpSource};
 use crate::ytdlp::YtDlp;
 
 /// The result of a run, and its exit code (PLAN.md, section 3).
@@ -131,15 +131,21 @@ fn run(cli: &Cli) -> Outcome {
         channel_dir.display()
     );
 
-    let http = match HttpClient::new(None) {
+    let http = match HttpClient::new(cli.proxy.as_deref()) {
         Ok(http) => http,
         Err(error) => return fail(error, Outcome::Fatal),
     };
+    if cli.proxy.is_some() {
+        tracing::info!("Using the proxy for the transcript requests");
+    }
     let mut sleeper = match RealSleeper::install() {
         Ok(sleeper) => sleeper,
         Err(error) => return fail(format!("cannot handle Ctrl-C: {error}"), Outcome::Fatal),
     };
-    let mut source = Innertube::new(&http);
+    let mut source: Box<dyn TrackSource + '_> = match cli.backend {
+        Backend::Innertube => Box::new(Innertube::new(&http)),
+        Backend::YtDlp => Box::new(YtDlpSource::new(&ytdlp, cli.proxy.as_deref())),
+    };
     let settings = Settings {
         fallback_lang: cli.lang.clone(),
         max_videos: cli.max_videos,
@@ -152,7 +158,7 @@ fn run(cli: &Cli) -> Outcome {
         cooldown: cli.cooldown,
     });
     let stop = Runner::new(
-        &mut source,
+        source.as_mut(),
         &http,
         &mut store,
         &listing.name,

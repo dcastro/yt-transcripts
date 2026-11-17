@@ -134,7 +134,8 @@ impl RealSleeper {
                 std::process::exit(130);
             }
             tracing::warn!(
-                "Stopping after the current video. Press Ctrl-C again to stop immediately"
+                "Stopping. A video that is in progress finishes first. Press Ctrl-C again to \
+                 stop immediately"
             );
         })?;
         Ok(Self { stop })

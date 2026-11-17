@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 /// Download the transcripts of all long videos of a YouTube channel.
 ///
@@ -50,6 +50,15 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) max_videos: Option<usize>,
 
+    /// http://, https:// or socks5:// proxy for the transcript requests. The video list does not
+    /// use it.
+    #[arg(long)]
+    pub(crate) proxy: Option<String>,
+
+    /// The source of the caption tracks.
+    #[arg(long, value_enum, default_value_t = Backend::Innertube)]
+    pub(crate) backend: Backend,
+
     /// Skip videos shorter than this duration (for example "2m").
     #[arg(long, value_parser = humantime::parse_duration)]
     pub(crate) min_duration: Option<Duration>,
@@ -67,6 +76,14 @@ pub(crate) struct Cli {
     pub(crate) verbose: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Backend {
+    /// The Innertube player request. 2 requests for each video.
+    Innertube,
+    /// `yt-dlp -J`. More requests for each video, but yt-dlp gets updates when YouTube changes.
+    YtDlp,
+}
+
 fn parse_fraction(text: &str) -> Result<f64, String> {
     let value: f64 = text
         .parse()
@@ -80,13 +97,22 @@ fn parse_fraction(text: &str) -> Result<f64, String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
-    use super::{Cli, parse_fraction};
+    use super::{Backend, Cli, parse_fraction};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn backend_names() {
+        let cli = Cli::try_parse_from(["yt-transcripts", "@x", "-o", "out", "--backend", "yt-dlp"])
+            .unwrap();
+        assert_eq!(cli.backend, Backend::YtDlp);
+        let cli = Cli::try_parse_from(["yt-transcripts", "@x", "-o", "out"]).unwrap();
+        assert_eq!(cli.backend, Backend::Innertube);
     }
 
     #[test]

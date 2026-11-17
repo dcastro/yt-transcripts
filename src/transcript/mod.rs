@@ -4,12 +4,14 @@ mod innertube;
 mod json3;
 mod select;
 mod youtube_consts;
+mod ytdlp;
 
 use reqwest::Url;
 
 pub(crate) use self::innertube::Innertube;
 pub(crate) use self::select::{Reason, select_track};
 use self::youtube_consts::PO_TOKEN_MARKER;
+pub(crate) use self::ytdlp::YtDlpSource;
 use crate::error::FetchError;
 use crate::http::HttpClient;
 use crate::model::{CaptionTrack, Segment, TrackList};

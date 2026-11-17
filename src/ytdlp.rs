@@ -46,7 +46,7 @@ impl YtDlp {
 
     /// Run `yt-dlp` with the arguments, and return its standard output.
     pub(crate) fn run(&self, args: &[&str]) -> Result<Vec<u8>, YtDlpError> {
-        tracing::debug!("yt-dlp {}", args.join(" "));
+        tracing::debug!("yt-dlp {}", loggable(args));
         let output = Command::new(PROGRAM)
             .args(args)
             .output()
@@ -59,6 +59,17 @@ impl YtDlp {
             })
         }
     }
+}
+
+/// The arguments for the log. The proxy URL can contain a password, so it is hidden.
+fn loggable(args: &[&str]) -> String {
+    let mut parts = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for arg in args {
+        parts.push(if hide_next { "<hidden>" } else { arg });
+        hide_next = *arg == "--proxy";
+    }
+    parts.join(" ")
 }
 
 /// Keep only the `ERROR:` lines of the standard error, if there are some. yt-dlp also writes
@@ -78,7 +89,13 @@ fn error_lines(stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::error_lines;
+    use super::{error_lines, loggable};
+
+    #[test]
+    fn log_hides_the_proxy() {
+        let args = ["-J", "--proxy", "http://user:secret@proxy:80", "--", "url"];
+        assert_eq!(loggable(&args), "-J --proxy <hidden> -- url");
+    }
 
     #[test]
     fn error_lines_keeps_only_errors() {
