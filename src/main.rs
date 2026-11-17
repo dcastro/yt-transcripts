@@ -7,6 +7,7 @@ mod http;
 mod model;
 mod run;
 mod store;
+mod throttle;
 mod transcript;
 mod ytdlp;
 
@@ -23,6 +24,7 @@ use crate::http::HttpClient;
 use crate::model::Video;
 use crate::run::{Runner, Settings, Stop};
 use crate::store::{Manifest, Status, Store};
+use crate::throttle::{MAX_UNEXPECTED_IN_SEQUENCE, RealSleeper, Throttle, ThrottleSettings};
 use crate::transcript::Innertube;
 use crate::ytdlp::YtDlp;
 
@@ -34,6 +36,7 @@ enum Outcome {
     Usage,
     Blocked,
     SomeFailed,
+    Interrupted,
 }
 
 impl Outcome {
@@ -44,6 +47,7 @@ impl Outcome {
             Self::Usage => ExitCode::from(2),
             Self::Blocked => ExitCode::from(3),
             Self::SomeFailed => ExitCode::from(4),
+            Self::Interrupted => ExitCode::from(130),
         }
     }
 }
@@ -131,20 +135,33 @@ fn run(cli: &Cli) -> Outcome {
         Ok(http) => http,
         Err(error) => return fail(error, Outcome::Fatal),
     };
+    let mut sleeper = match RealSleeper::install() {
+        Ok(sleeper) => sleeper,
+        Err(error) => return fail(format!("cannot handle Ctrl-C: {error}"), Outcome::Fatal),
+    };
     let mut source = Innertube::new(&http);
     let settings = Settings {
         fallback_lang: cli.lang.clone(),
-        delay: cli.delay,
         max_videos: cli.max_videos,
     };
-    let mut runner = Runner {
-        source: &mut source,
-        http: &http,
-        store: &mut store,
-        channel: &listing.name,
-        settings: &settings,
-    };
-    let stop = match runner.run(&pending) {
+    let mut throttle = Throttle::new(ThrottleSettings {
+        delay: cli.delay,
+        jitter: cli.jitter,
+        batch_size: cli.batch_size,
+        batch_pause: cli.batch_pause,
+        cooldown: cli.cooldown,
+    });
+    let stop = Runner::new(
+        &mut source,
+        &http,
+        &mut store,
+        &listing.name,
+        &settings,
+        &mut throttle,
+        &mut sleeper,
+    )
+    .run(&pending);
+    let stop = match stop {
         Ok(stop) => stop,
         Err(error) => return fail(error, Outcome::Fatal),
     };
@@ -152,12 +169,30 @@ fn run(cli: &Cli) -> Outcome {
     let counts = count_statuses(&listing.videos, store.manifest());
     log_summary(&counts);
     match stop {
-        Stop::Blocked => {
+        Stop::Blocked(reason) => {
+            // The circuit breaker (PLAN.md, section 7.6).
+            tracing::error!("YouTube blocked the requests: {reason}");
             tracing::error!(
-                "YouTube blocked the requests. The state is saved. Wait some hours, then run the \
-                 same command again, or use a proxy"
+                "The run stopped, and the state is saved. {} videos are done, {} are pending",
+                counts.get(&Some(Status::Done)).copied().unwrap_or(0),
+                counts.get(&None).copied().unwrap_or(0)
+            );
+            tracing::error!(
+                "To continue, wait some hours and run the same command again, or use --proxy"
             );
             Outcome::Blocked
+        }
+        Stop::Interrupted => {
+            tracing::warn!("Stopped by Ctrl-C. Run the same command again to continue");
+            Outcome::Interrupted
+        }
+        Stop::TooManyUnexpected => {
+            tracing::error!(
+                "Stopped after {MAX_UNEXPECTED_IN_SEQUENCE} unexpected responses in sequence. \
+                 YouTube probably changed its site. Look at the files in the debug folder, and \
+                 try --backend yt-dlp"
+            );
+            Outcome::Fatal
         }
         Stop::Finished => {
             let failed = counts.get(&Some(Status::Failed)).copied().unwrap_or(0)
