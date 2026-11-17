@@ -534,10 +534,24 @@ the proxy password.
 
 ### Phase 5: real run
 
-Status: started on 2026-11-17, not complete. The first run (`--max-videos 1 --cooldown 2m`) got
-the API key, the player response and the original language (`en-US`). `timedtext` gave HTTP 429
-two times. The circuit breaker stopped the run with exit code 3. The IP block from the previous
-attempt is still active. Run the next steps when the block stops.
+Status: done on 2026-11-17. Results:
+
+- The first run (`--max-videos 1 --cooldown 2m`) got the API key, the player response and the
+  original language (`en-US`). `timedtext` gave HTTP 429 two times. The circuit breaker stopped
+  the run with exit code 3, as designed. The IP block from the previous attempt was still active.
+- A phone hotspot did not change the public IP address while the phone shared its Wi-Fi
+  connection. With mobile data, the IP address changed and YouTube did not block the requests.
+- With the new IP address, `--max-videos 5` and then the full run worked without a proxy. The
+  full run took 51 minutes for 177 videos. It got no HTTP 429 and did no retries.
+- Result: 180 transcripts (all `en`, auto-generated) and 2 videos without a transcript (clips
+  without speech).
+- The real `json3` responses agree with the parser. In all files, the timestamps are in order and
+  no line is empty.
+- The last run sent only the video list request and no transcript requests.
+- To find the IP address that YouTube sees, use the `ip` value of a stream URL in the player
+  response. The track URLs always contain `ip=0.0.0.0`.
+
+Steps:
 
 - Run on the target channel with `--max-videos 5`, without a proxy.
 - Then run on the full channel with the default settings. Monitor the log.
@@ -565,6 +579,7 @@ attempt is still active. Run the next steps when the block stops.
 | --- | --- |
 | YouTube changes the Innertube API or the client values. | Values are in one module. The `yt-dlp` backend is the fallback. Stop after 5 parse errors in sequence. |
 | YouTube requires a PO token for transcript requests. | The `yt-dlp` backend gets updates for this. Monitor `youtube-transcript-api` issues. |
+| YouTube sends HTTP 429 for an auto-translated track if the request comes less than approx. 60 s after the `player` request ([yt-dlp issue 13831](https://github.com/yt-dlp/yt-dlp/issues/13831)). | The tool requests only original tracks. The yt-dlp maintainers report that this rule does not apply to original tracks. |
 | The block occurs even with the slow defaults. | The circuit breaker stops the run. The next run resumes. The user can increase `--delay` or use `--proxy`. |
 | `yt-dlp` is missing or old. | Check at start. Show the installed version in `--verbose`. |
 | A video has no auto-generated track and many manual tracks. | Rule 3 in section 6.3 selects `--lang`. The log shows a warning. |
