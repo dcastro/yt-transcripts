@@ -75,6 +75,7 @@ Exit codes:
 | Code | Meaning |
 | --- | --- |
 | 0 | All work is done. |
+| 1 | Fatal error, for example `yt-dlp` is missing, or 5 parse errors in sequence. |
 | 2 | Usage error, or the channel is not found. |
 | 3 | YouTube blocked the tool. The run stopped. Run the same command again later. |
 | 4 | The run is complete, but some videos failed. |
@@ -119,8 +120,11 @@ Reasons:
   native Rust parser of these pages is fragile.
 - No API key is necessary.
 
-`yt-dlp` is already installed (`/usr/local/bin/yt-dlp`, version 2026.07.04). The tool checks
+`yt-dlp` is already installed (`/usr/local/bin/yt-dlp`, version 2026.10.26). The tool checks
 for `yt-dlp` at start and shows a clear error if it is missing.
+
+Phase 0 result: the `/videos` tab of `@Skateiq` has 182 entries. The list took 3 s. The entries
+have the title and the duration, but no upload date. The shortest entry is 40 s long.
 
 The video list does not use the proxy. These requests worked during the previous block, and a
 direct connection does not use proxy bandwidth.
@@ -168,34 +172,47 @@ This needs 2 requests per video. `yt-dlp` sends more requests per video. Fewer r
 means more videos before YouTube applies a limit.
 
 Put the client name, the client version and the endpoint paths in one constants module. YouTube
-changes these values sometimes.
+changes these values sometimes. Phase 0 used the values of `youtube-transcript-api` 1.2.5:
+client `ANDROID`, version `20.10.38`.
 
-First, examine the crate `yt-transcript-rs` (version 0.1.8). Use it only if these conditions are
-true:
+The `ANDROID` player response does not contain the upload date. Thus, this backend does not
+write an upload date.
 
-- It is maintained, and it works with the current YouTube site.
-- It accepts our own `reqwest` client (for the proxy and the throttle).
-- It gives errors that let us identify a block.
-- It shows the track kind (`asr` or manual), so that the rules in section 6.3 are possible.
-
-If one condition is false, write our own module. It is approx. 200 lines.
+Phase 0 decision: do not use the crate `yt-transcript-rs` (version 0.1.8). It is async only, it
+uses an old `WEB` client version from 2023, and it does not read the audio tracks. Without the
+audio tracks, the rules in section 6.3 are not possible. Write our own module.
 
 ### 6.3 Track selection: the original language
 
 The tool gets the transcript in the original language of the video. It never uses a translated
 track (`tlang`).
 
-1. Find the auto-generated track (`kind: "asr"`). Its language is the spoken language of the
-   video. This is the original language.
-2. If there is an auto-generated track:
-   1. If there is a manual track in the same language, use the manual track. Its quality is
+Phase 0 found that one video can have many auto-generated tracks. YouTube auto-dubs videos into
+other languages, and it makes one auto-generated track for each dubbed audio track. The test
+video had 21 auto-generated tracks. Thus, an auto-generated track alone does not identify the
+original language.
+
+The player response has the audio tracks in `streamingData.adaptiveFormats[].audioTrack`. The
+original audio track has `audioIsDefault: true`. The dubbed audio tracks have
+`isAutoDubbed: true`. The language is the first part of the track `id` (`en-US.4` → `en-US`).
+
+1. Find the original language:
+   1. Use the language of the audio track with `audioIsDefault: true`.
+   2. If there is no audio track data, and there is only one auto-generated track, use the
+      language of that track.
+   3. If not, the original language is not clear. Go to step 3.
+2. If the original language is known:
+   1. If there is a manual track in that language, use the manual track. Its quality is
       better. Compare only the main language code: `en-US` and `en-GB` both match `en`.
-   2. If not, use the auto-generated track.
-3. If there is no auto-generated track, the original language is not clear:
+   2. If not, use the auto-generated track in that language.
+   3. If there is no track in that language, go to step 3.
+3. If the original language is not clear:
    1. If there is one manual track, use it.
    2. If there are more manual tracks, use the track in the `--lang` language (default `en`).
    3. If there is no track in that language, use the first manual track. Write a warning to
       the log.
+   4. If there are no manual tracks, use the auto-generated track in the `--lang` language.
+      If there is none, use the first auto-generated track. Write a warning to the log.
 4. If there are no tracks, record `no_transcript`.
 
 ### 6.4 Backend 2: `yt-dlp` (fallback)
@@ -205,10 +222,15 @@ Use this backend if YouTube changes its site and the `innertube` backend stops w
 1. Run `yt-dlp -J --skip-download --proxy <PROXY> <VIDEO_URL>` one time per video. The tool
    throttle controls the delay.
 2. Read the `subtitles` (manual) and `automatic_captions` maps, and the `language` field.
-   `automatic_captions` also contains auto-translated tracks. Identify the original
-   auto-generated track by its `-orig` key, or by the `language` field. Phase 0 confirms which
-   one is correct.
-3. Select a track with the rules in section 6.3.
+   Phase 0 found these facts:
+   - The `language` field is the original language (`en-US`).
+   - `automatic_captions` has one `<lang>-orig` key for each auto-generated track. Thus, a
+     dubbed video has many `-orig` keys. The `-orig` key alone does not identify the original
+     language.
+   - All other keys in `automatic_captions` are translations (`tlang`). Ignore them.
+   - The `upload_date` field is present. This backend writes it.
+3. Select a track with the rules in section 6.3. Use the `language` field as the original
+   language.
 4. Get the `json3` URL of the track with the shared HTTP client. Parse it with the same parser as
    backend 1.
 5. Parse the `yt-dlp` error text to classify the error (for example `HTTP Error 429`).
@@ -237,8 +259,9 @@ is slow, but the tool runs without supervision and it can resume.
 ### 7.4 Minimum requests
 
 - Get the Innertube API key one time per run.
-- Get the title, the duration and the upload date from the video list. Do not send a separate
-  request for each video.
+- Get the title and the duration from the video list. Do not send a separate request for each
+  video. (The list has no upload date. Only the `yt-dlp` backend gives an upload date.)
+- Between the requests for one video (player, then track), wait a short random time (1 s to 3 s).
 - Skip all videos that the manifest marks as done or as permanently unavailable.
 - Do not request a transcript track list two times for one video in one run.
 
@@ -300,12 +323,11 @@ possible recoveries:
 - Rotating Residential is billed per GB. The smallest package is 1 GB. Third-party reviews give
   approx. US$3.50 for 1 GB. Examine the current price on the Webshare pricing page before you
   buy.
-- Bandwidth estimate for 200 videos:
-  - One player response: approx. 50–150 KB.
-  - One `json3` transcript of a long video: approx. 100–400 KB before compression.
-  - One watch page per run: approx. 1 MB.
-  - Total: approx. 200 × 0.5 MB ≈ 100 MB. This is 10 % of the 1 GB package. With gzip
-    compression, the total is smaller.
+- Bandwidth estimate for 200 videos (Phase 0 measured the first two values with gzip):
+  - One watch page per run: 358 KB.
+  - One player response: 58 KB.
+  - One `json3` transcript of a long video: approx. 20–80 KB (estimate).
+  - Total: approx. 200 × 0.14 MB ≈ 30 MB. This is 3 % of the 1 GB package.
 - The bandwidth of a Rotating Residential package resets every 30 days and does not carry over.
   Thus, buy it only when it is necessary, and use it in one session.
 - With a rotating proxy, each request gets a new IP address. The user can then set a shorter
@@ -360,6 +382,8 @@ fetched_at: 2026-11-17T16:02:11Z
 
 Each line has a timestamp. A search with `rg` then shows the position in the video directly.
 This was necessary in the previous task. Use `[hh:mm:ss]` for videos of 1 hour or longer.
+
+The tool writes `upload_date` only when the backend gives it (section 6.2).
 
 ### Manifest
 
@@ -437,6 +461,17 @@ src/
 ## 11. Implementation phases
 
 ### Phase 0: spike (live, minimum requests)
+
+Status: done on 2026-11-17. Results:
+
+- The video list works (182 videos).
+- The watch page and the `player` request work.
+- `timedtext` gave HTTP 429 with the Google "We're sorry" page. The IP block from the previous
+  attempt (the same day) is still active. The `json3` fixtures are synthetic.
+- The test video has auto-dubbed audio tracks. This changed the rules in section 6.3.
+- `yt-transcript-rs` is not used (section 6.2).
+
+Steps:
 
 1. Send one request to check that the IP block has stopped. If it has not stopped, wait.
 2. Run the `yt-dlp` list command on the target channel. Save the output as a test fixture.

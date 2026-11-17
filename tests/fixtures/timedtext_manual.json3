@@ -1,0 +1,13 @@
+{
+ "wireMagic": "pb3",
+ "pens": [{}],
+ "wsWinStyles": [{}],
+ "wpWinPositions": [{}],
+ "events": [
+  {"tStartMs": 1200, "dDurationMs": 3000, "segs": [{"utf8": "Everyone wants to practice manuals\nfrom four wheels back to four wheels."}]},
+  {"tStartMs": 4200, "dDurationMs": 2500, "segs": [{"utf8": "And then whenever they hit the tail,"}]},
+  {"tStartMs": 6700, "dDurationMs": 1000},
+  {"tStartMs": 6800, "dDurationMs": 1500, "segs": [{"utf8": "   "}]},
+  {"tStartMs": 7700, "dDurationMs": 2100, "segs": [{"utf8": "that's a fall."}]}
+ ]
+}
