@@ -148,13 +148,16 @@ run, so new uploads are included.
 ### 6.1 Interface
 
 ```rust
-pub trait TranscriptSource {
-    fn fetch(&self, video: &VideoRef, fallback_lang: &str) -> Result<Transcript, FetchError>;
+pub(crate) trait TrackSource {
+    fn list_tracks(&mut self, video_id: &str) -> Result<TrackList, FetchError>;
 }
 ```
 
-All transcript requests of a backend go through one shared HTTP client. This client applies the
-proxy, the User-Agent, gzip compression and the cookie jar.
+A backend only gives the caption tracks. The track selection (section 6.3) and the track
+download are the same for both backends. Thus, the runner can pause between the two steps.
+
+All transcript requests go through one shared HTTP client. This client applies the proxy, the
+User-Agent, gzip compression and the cookie jar.
 
 ### 6.2 Backend 1: `innertube` (default)
 
@@ -425,36 +428,42 @@ partial file. If a crash occurs between the two steps, the next run fetches that
 | Crate | Use |
 | --- | --- |
 | `clap` (derive) | Command line parser |
-| `reqwest` (`blocking`, `json`, `cookies`, `gzip`, `socks`, `rustls-tls`) | HTTP client and proxy |
+| `reqwest` 0.13 (`blocking`, `json`, `cookies`, `gzip`, `socks`) | HTTP client and proxy. TLS is rustls by default in 0.13. |
 | `serde`, `serde_json` | JSON parse and write |
 | `thiserror` | Error types (`FetchError` and its classes) |
-| `anyhow` | Errors in `main` |
 | `tracing`, `tracing-subscriber` | Log output |
-| `rand` | Jitter |
-| `humantime` | Parse durations such as `10s` and `5m` |
-| `indicatif` | Progress bar |
+| `humantime` | Parse durations such as `10s` and `5m`, and RFC 3339 timestamps |
 | `ctrlc` | Safe stop on Ctrl-C |
-| `jiff` or `chrono` | Timestamps |
 | `tempfile` | Atomic writes |
-| `httpmock` or `mockito` (dev) | Mock HTTP server for tests |
+| `mockito` (dev) | Mock HTTP server for tests |
 
-Use the `rust-instructions` skill and `ctx7` docs for the current crate APIs at implementation.
+Changes from the first plan:
+
+- No `rand`. The jitter uses a small SplitMix64 generator in `throttle.rs`.
+- No `indicatif`. Each video gives one log line (`[12/182] title (id)`).
+- No `jiff` or `chrono`. `humantime` formats the timestamps.
+- No `anyhow`. Each module has its own `thiserror` type.
 
 ## 10. Module layout
 
 ```text
 src/
-  main.rs            CLI wiring, exit codes
+  main.rs            CLI wiring, dry run, summary, exit codes
   cli.rs             clap definitions
   channel.rs         channel resolution and video list (yt-dlp subprocess)
-  model.rs           VideoRef, Transcript, Segment, CaptionTrack
+  ytdlp.rs           yt-dlp subprocess wrapper (the log hides the proxy URL)
+  model.rs           Video, CaptionTrack, TrackList, Segment
+  http.rs            shared HTTP client, response classification
+  error.rs           FetchError
   transcript/
-    mod.rs           TranscriptSource trait, track selection, json3 parser
+    mod.rs           TrackSource trait, track download
     innertube.rs     backend 1
     ytdlp.rs         backend 2
-    youtube_consts.rs  client name, client version, endpoint paths
-  throttle.rs        delay, jitter, batch pause, backoff, circuit breaker
-  error.rs           FetchError and classification
+    select.rs        track selection (section 6.3)
+    json3.rs         json3 parser
+    youtube_consts.rs  client name, client version, endpoint paths, markers
+  throttle.rs        delay, jitter, batch pause, backoff, cool-down, Sleeper, Ctrl-C
+  run.rs             download loop, retries, circuit breaker
   store.rs           manifest, atomic writes, Markdown output
 ```
 
@@ -488,17 +497,23 @@ Send no more than 10 requests in this phase.
 
 ### Phase 1: list and dry run
 
+Status: done.
+
 - `cli.rs`, `channel.rs`, `model.rs`.
 - `--dry-run` shows the list of long videos and the count of pending videos.
 - Unit tests with the list fixture.
 
 ### Phase 2: transcript fetch and storage
 
+Status: done.
+
 - `transcript/innertube.rs`, track selection, `json3` parser.
 - `store.rs`: Markdown output, manifest, atomic writes, resume rules.
 - Unit tests with the fixtures. Do not use the network in unit tests.
 
 ### Phase 3: throttle and circuit breaker
+
+Status: done.
 
 - `throttle.rs` and `error.rs`.
 - Tests with a mock HTTP server: transient error then success, 429 then cool-down then success,
@@ -508,11 +523,21 @@ Send no more than 10 requests in this phase.
 
 ### Phase 4: proxy and `yt-dlp` backend
 
+Status: done. `mitmproxy` is not installed. The proxy test uses a mock HTTP server as the proxy
+for an `http://` URL. A manual test with a closed local port (`--proxy http://127.0.0.1:9`)
+showed the connection error, the backoff, the Ctrl-C stop (exit code 130), and that the log hides
+the proxy password.
+
 - `--proxy` for `reqwest` and for the `yt-dlp` subprocess.
 - `transcript/ytdlp.rs`.
 - Test `--proxy` with a local proxy (for example `mitmproxy`), not with a paid proxy.
 
 ### Phase 5: real run
+
+Status: started on 2026-11-17, not complete. The first run (`--max-videos 1 --cooldown 2m`) got
+the API key, the player response and the original language (`en-US`). `timedtext` gave HTTP 429
+two times. The circuit breaker stopped the run with exit code 3. The IP block from the previous
+attempt is still active. Run the next steps when the block stops.
 
 - Run on the target channel with `--max-videos 5`, without a proxy.
 - Then run on the full channel with the default settings. Monitor the log.
@@ -530,7 +555,8 @@ Send no more than 10 requests in this phase.
 - Unit tests: track selection (all rules in section 6.3), `json3` parser, timestamp format, slug,
   error classification, manifest resume rules.
 - Mock HTTP tests: all rows of the table in section 7.5.
-- One live test, marked `#[ignore]`. It fetches one transcript. Run it only by hand.
+- One live test, marked `#[ignore]`. It fetches one transcript. Run it only by hand:
+  `cargo test live_ -- --ignored --nocapture`.
 - Do not add tests that send many live requests.
 
 ## 13. Risks

@@ -60,7 +60,27 @@ fn json3_url(track_url: &str) -> Result<Url, FetchError> {
 
 #[cfg(test)]
 mod tests {
-    use super::json3_url;
+    use super::{Innertube, TrackSource, download_track, json3_url, select_track};
+    use crate::http::HttpClient;
+
+    /// A live test with 3 requests to YouTube. Run it only by hand:
+    /// `cargo test live_ -- --ignored --nocapture`
+    #[test]
+    #[ignore = "sends live requests to YouTube"]
+    fn live_fetch_one_transcript() {
+        let http = HttpClient::new(None).unwrap();
+        let mut source = Innertube::new(&http);
+        let list = source.list_tracks("WlmQHrgV7xA").unwrap();
+        let selection = select_track(&list, "en").unwrap();
+        let segments = download_track(&http, selection.track).unwrap();
+        println!(
+            "{} segments in {}; first: {:?}",
+            segments.len(),
+            selection.track.language_code,
+            segments.first()
+        );
+        assert!(segments.len() > 10);
+    }
 
     #[test]
     fn json3_url_replaces_the_format() {
