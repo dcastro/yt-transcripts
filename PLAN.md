@@ -1,7 +1,8 @@
 # yt-transcripts: plan
 
 A Rust command line tool. It gets the transcripts of all long videos of one YouTube channel. It
-does not get the transcripts of Shorts. It writes each transcript to a file in a given folder.
+does not get the transcripts of Shorts or live streams. It writes each transcript to a Markdown
+file in a given folder.
 
 ## 1. Lessons from the previous attempt
 
@@ -22,17 +23,22 @@ address. These are the causes and the lessons:
 ### Goals
 
 - Accept a channel as `@handle`, a channel URL, or a channel ID (`UC…`).
-- List all long videos of the channel. Exclude Shorts.
-- Get the transcript of each video and write it to the output folder.
+- List all long videos of the channel. Exclude Shorts and live streams.
+- Get the transcript of each video in its original language, and write it to the output folder.
 - Stay below the YouTube rate limit. If YouTube blocks the tool, stop safely.
 - Continue from the last position on the next run (resumable).
 - Support an HTTP or SOCKS5 proxy, for example a rotating residential proxy.
 
 ### Non-goals
 
+- Live streams and their recordings.
+- Translated transcripts.
 - Download of video or audio.
 - Speech-to-text for videos that have no captions.
 - Search of the transcripts. Use `rg` or a different tool on the output folder.
+- The YouTube Data API v3. Its `captions.download` method works only for the owner of the
+  channel. The user does not own the channel. The tool also does not need an API key for the
+  video list (section 5).
 - Login with a Google account or browser cookies. YouTube can ban the account. (This can be a
   later option, with a clear warning.)
 - Parallel downloads. The tool sends one transcript request at a time, on purpose.
@@ -48,19 +54,18 @@ Arguments:
 
 Options:
   -o, --out <DIR>         Output folder (required).
-  -l, --lang <LIST>       Preferred languages, in order [default: en].
+      --lang <CODE>       Language to use when the original language is not clear
+                          [default: en]. See section 6.3.
       --delay <DURATION>  Base delay between transcript requests [default: 10s].
       --jitter <FRAC>     Random change of the delay, +/- fraction [default: 0.5].
       --batch-size <N>    Number of transcripts before a long pause [default: 50].
       --batch-pause <D>   Length of the long pause [default: 5m].
       --cooldown <D>      Wait after the first HTTP 429, before one probe [default: 10m].
       --max-videos <N>    Stop after N new transcripts in this run.
-      --proxy <URL>       http://, https:// or socks5:// proxy for all requests.
+      --proxy <URL>       http://, https:// or socks5:// proxy for transcript requests.
       --backend <NAME>    innertube | yt-dlp [default: innertube].
-      --include-streams   Also get transcripts of past live streams.
       --min-duration <D>  Skip videos shorter than this duration.
       --retry-failed      Try again the videos that failed before with a transient error.
-      --format <FMT>      md | json | both [default: both].
       --dry-run           List the videos and the work to do. Send no transcript requests.
   -v, --verbose           Show each request in the log.
 ```
@@ -91,7 +96,7 @@ CHANNEL ──► resolve ──► list videos ──► filter ──► compa
                            │                    │                             │
                            │          block? ───┴──► save state, exit 3       │
                            ▼                                                  │
-                     write files (atomic) ──► update manifest (atomic) ───────┘
+                     write file (atomic) ──► update manifest (atomic) ────────┘
 ```
 
 ## 5. Channel resolution and video list
@@ -101,27 +106,31 @@ CHANNEL ──► resolve ──► list videos ──► filter ──► compa
 Use `yt-dlp` as a subprocess:
 
 ```text
-yt-dlp --flat-playlist --dump-single-json --proxy <PROXY> https://www.youtube.com/@handle/videos
+yt-dlp --flat-playlist --dump-single-json https://www.youtube.com/@handle/videos
 ```
 
 Reasons:
 
 - The `/videos` tab of a channel does not contain Shorts or live streams. Shorts are on the
-  `/shorts` tab, and live streams are on the `/streams` tab. Thus, the tab is the main Shorts
-  filter.
+  `/shorts` tab, and live streams are on the `/streams` tab. Thus, the tab is the main filter.
 - `--flat-playlist` gets approx. 30 videos per request. A channel with 200 videos needs approx. 7
   requests. These requests did not get blocked in the previous attempt.
 - The YouTube channel pages change often. `yt-dlp` gets frequent updates for these changes. A
   native Rust parser of these pages is fragile.
+- No API key is necessary.
 
 `yt-dlp` is already installed (`/usr/local/bin/yt-dlp`, version 2026.07.04). The tool checks
 for `yt-dlp` at start and shows a clear error if it is missing.
 
+The video list does not use the proxy. These requests worked during the previous block, and a
+direct connection does not use proxy bandwidth.
+
 ### Filter
 
-1. Use the `/videos` tab. With `--include-streams`, also use the `/streams` tab.
+1. Use only the `/videos` tab.
 2. Remove each entry with a URL that contains `/shorts/` (safety check).
-3. Remove upcoming and live-now entries. They have no transcript yet.
+3. Remove each entry with a live status (`is_live`, `is_upcoming`, `was_live`, `post_live`).
+   Premieres and old live streams can appear on the `/videos` tab.
 4. With `--min-duration`, remove shorter videos. Do not use a duration filter by default:
    Shorts can be up to 3 minutes long, and some long-form videos are shorter.
 
@@ -130,31 +139,20 @@ for `yt-dlp` at start and shows a clear error if it is missing.
 Write the filtered list to `videos.json` in the channel folder. The tool gets a new list on each
 run, so new uploads are included.
 
-### Later option: YouTube Data API v3
-
-If `YOUTUBE_API_KEY` is set, the tool can use the official API for the list:
-
-- `channels.list?forHandle=@handle` gives the channel ID (1 quota unit).
-- The playlist `UULF` + (channel ID without `UC`) contains only the long-form uploads.
-- `playlistItems.list` gives 50 videos per request (1 quota unit), with the publish date.
-
-The official API cannot give transcripts of videos that you do not own. Thus, the API does not
-solve the transcript rate limit.
-
 ## 6. Transcript fetch
 
-### Interface
+### 6.1 Interface
 
 ```rust
 pub trait TranscriptSource {
-    fn fetch(&self, video: &VideoRef, langs: &[String]) -> Result<Transcript, FetchError>;
+    fn fetch(&self, video: &VideoRef, fallback_lang: &str) -> Result<Transcript, FetchError>;
 }
 ```
 
-All network calls of a backend go through one shared HTTP client. This client applies the proxy,
-the User-Agent and the cookie jar.
+All transcript requests of a backend go through one shared HTTP client. This client applies the
+proxy, the User-Agent, gzip compression and the cookie jar.
 
-### Backend 1: `innertube` (default)
+### 6.2 Backend 1: `innertube` (default)
 
 Use the same method as `youtube-transcript-api` 1.x. This method worked in the previous attempt
 before the block.
@@ -163,9 +161,7 @@ before the block.
    video.
 2. For each video, send a `POST /youtubei/v1/player` request with an `ANDROID` client context.
 3. Read `captions.playerCaptionsTracklistRenderer.captionTracks`.
-4. Select a track. Use this order: a manual track in a preferred language, then an
-   auto-generated track in a preferred language, then any manual track, then any auto-generated
-   track.
+4. Select a track with the rules in section 6.3.
 5. Get the track `baseUrl` with `fmt=json3`. Parse the segments (start, duration, text).
 
 This needs 2 requests per video. `yt-dlp` sends more requests per video. Fewer requests per video
@@ -180,21 +176,42 @@ true:
 - It is maintained, and it works with the current YouTube site.
 - It accepts our own `reqwest` client (for the proxy and the throttle).
 - It gives errors that let us identify a block.
+- It shows the track kind (`asr` or manual), so that the rules in section 6.3 are possible.
 
 If one condition is false, write our own module. It is approx. 200 lines.
 
-### Backend 2: `yt-dlp` (fallback)
+### 6.3 Track selection: the original language
+
+The tool gets the transcript in the original language of the video. It never uses a translated
+track (`tlang`).
+
+1. Find the auto-generated track (`kind: "asr"`). Its language is the spoken language of the
+   video. This is the original language.
+2. If there is an auto-generated track:
+   1. If there is a manual track in the same language, use the manual track. Its quality is
+      better. Compare only the main language code: `en-US` and `en-GB` both match `en`.
+   2. If not, use the auto-generated track.
+3. If there is no auto-generated track, the original language is not clear:
+   1. If there is one manual track, use it.
+   2. If there are more manual tracks, use the track in the `--lang` language (default `en`).
+   3. If there is no track in that language, use the first manual track. Write a warning to
+      the log.
+4. If there are no tracks, record `no_transcript`.
+
+### 6.4 Backend 2: `yt-dlp` (fallback)
 
 Use this backend if YouTube changes its site and the `innertube` backend stops working.
 
-```text
-yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs "en.*,en" \
-       --sub-format json3 --proxy <PROXY> -o <TMP>/%(id)s.%(ext)s <VIDEO_URL>
-```
-
-The tool calls `yt-dlp` one time per video. The tool throttle controls the delay. Parse the
-`json3` file with the same parser as backend 1. Parse the `yt-dlp` error text to classify the
-error (for example `HTTP Error 429`).
+1. Run `yt-dlp -J --skip-download --proxy <PROXY> <VIDEO_URL>` one time per video. The tool
+   throttle controls the delay.
+2. Read the `subtitles` (manual) and `automatic_captions` maps, and the `language` field.
+   `automatic_captions` also contains auto-translated tracks. Identify the original
+   auto-generated track by its `-orig` key, or by the `language` field. Phase 0 confirms which
+   one is correct.
+3. Select a track with the rules in section 6.3.
+4. Get the `json3` URL of the track with the shared HTTP client. Parse it with the same parser as
+   backend 1.
+5. Parse the `yt-dlp` error text to classify the error (for example `HTTP Error 429`).
 
 ## 7. Rate limit strategy
 
@@ -214,7 +231,7 @@ The random value prevents a regular pattern of requests.
 
 After each `--batch-size` transcripts (default 50), wait `--batch-pause` (default 5 minutes).
 
-Example: a channel with 180 long videos takes approx. 180 × 11 s + 3 × 5 min ≈ 48 minutes. This
+Example: a channel with 200 long videos takes approx. 200 × 11 s + 3 × 5 min ≈ 52 minutes. This
 is slow, but the tool runs without supervision and it can resume.
 
 ### 7.4 Minimum requests
@@ -253,18 +270,56 @@ prevents this.
 
 ### 7.7 Proxy
 
-`--proxy` applies to all HTTP requests and to all `yt-dlp` calls. A rotating residential proxy
-(for example Webshare) gives a new IP address for each request. With a rotating proxy, the user
-can set a shorter `--delay`.
+`--proxy` applies to all transcript requests (the watch page, the player requests, the track
+downloads, and the `yt-dlp` backend calls). It does not apply to the video list (section 5).
+
+#### Recommendation: try without a proxy first
+
+The target channel has approx. 200 videos, and the user runs the tool rarely. The slow defaults
+send approx. 400 requests in approx. 1 hour. The previous block came from approx. 210 requests in
+a burst, without a delay. Thus, a run without a proxy has a good chance to succeed. A success is
+not certain, because YouTube does not publish its limits.
+
+If YouTube blocks the run, the circuit breaker stops it, and no work is lost. Then there are two
+possible recoveries:
+
+- Wait until the next day, and run the same command again. It continues from the last position.
+  Over 2 or 3 days, this completes the channel.
+- Buy a proxy and run again with `--proxy`.
+
+#### Webshare: the free plan is not sufficient
+
+- The Webshare free plan gives 10 shared **datacenter** proxies and 1 GB per month.
+- The `youtube-transcript-api` documentation says that YouTube blocks datacenter IP addresses.
+  It tells users to buy a **"Residential"** package, and not "Proxy Server" (datacenter) or
+  "Static Residential".
+- Thus, the free plan will probably not work. Do not use it.
+
+#### Webshare: the smallest Residential package is sufficient
+
+- Rotating Residential is billed per GB. The smallest package is 1 GB. Third-party reviews give
+  approx. US$3.50 for 1 GB. Examine the current price on the Webshare pricing page before you
+  buy.
+- Bandwidth estimate for 200 videos:
+  - One player response: approx. 50–150 KB.
+  - One `json3` transcript of a long video: approx. 100–400 KB before compression.
+  - One watch page per run: approx. 1 MB.
+  - Total: approx. 200 × 0.5 MB ≈ 100 MB. This is 10 % of the 1 GB package. With gzip
+    compression, the total is smaller.
+- The bandwidth of a Rotating Residential package resets every 30 days and does not carry over.
+  Thus, buy it only when it is necessary, and use it in one session.
+- With a rotating proxy, each request gets a new IP address. The user can then set a shorter
+  `--delay`, for example `3s`. Keep the circuit breaker active.
 
 ### 7.8 HTTP client settings
 
 - Use one realistic desktop User-Agent for the full run.
 - Keep a cookie jar for the run. Set a consent cookie, so that the EU consent page does not
   appear.
+- Accept gzip compression. This decreases the proxy bandwidth.
 - Set a request timeout of 30 s.
-- With `--verbose`, log each request with the time, the URL path and the HTTP status. The user
-  can then tune the delay values.
+- With `--verbose`, log each request with the time, the URL path, the HTTP status and the
+  response size. The user can then tune the delay values and monitor the proxy bandwidth.
 
 ## 8. Storage
 
@@ -277,7 +332,6 @@ can set a shorter `--delay`.
     videos.json
     transcripts/
       <video_id>_<title-slug>.md
-      <video_id>_<title-slug>.json
     debug/                         # only for parse errors
 ```
 
@@ -305,12 +359,7 @@ fetched_at: 2026-11-17T16:02:11Z
 ```
 
 Each line has a timestamp. A search with `rg` then shows the position in the video directly.
-This was necessary in the previous task.
-
-### JSON file
-
-The same metadata, and the full list of segments (`start`, `duration`, `text`). Other tools can
-use this file.
+This was necessary in the previous task. Use `[hh:mm:ss]` for videos of 1 hour or longer.
 
 ### Manifest
 
@@ -320,7 +369,7 @@ use this file.
 {
   "biHf4BXm4G0": {
     "status": "done",
-    "file_stem": "biHf4BXm4G0_how-to-manual-like-a-pro",
+    "file": "transcripts/biHf4BXm4G0_how-to-manual-like-a-pro.md",
     "language": "en",
     "attempts": 1,
     "last_error": null,
@@ -335,7 +384,7 @@ the manifest is pending.
 ### Atomic writes
 
 Write each file to a temporary file in the same folder. Then rename it to the final name. Write
-the transcript files first, then update the manifest. Thus, a crash or Ctrl-C cannot leave a
+the transcript file first, then update the manifest. Thus, a crash or Ctrl-C cannot leave a
 partial file. If a crash occurs between the two steps, the next run fetches that one video again.
 
 ### Resume rules
@@ -352,7 +401,7 @@ partial file. If a crash occurs between the two steps, the next run fetches that
 | Crate | Use |
 | --- | --- |
 | `clap` (derive) | Command line parser |
-| `reqwest` (`blocking`, `json`, `cookies`, `socks`, `rustls-tls`) | HTTP client and proxy |
+| `reqwest` (`blocking`, `json`, `cookies`, `gzip`, `socks`, `rustls-tls`) | HTTP client and proxy |
 | `serde`, `serde_json` | JSON parse and write |
 | `thiserror` | Error types (`FetchError` and its classes) |
 | `anyhow` | Errors in `main` |
@@ -374,7 +423,7 @@ src/
   main.rs            CLI wiring, exit codes
   cli.rs             clap definitions
   channel.rs         channel resolution and video list (yt-dlp subprocess)
-  model.rs           VideoRef, Transcript, Segment
+  model.rs           VideoRef, Transcript, Segment, CaptionTrack
   transcript/
     mod.rs           TranscriptSource trait, track selection, json3 parser
     innertube.rs     backend 1
@@ -382,20 +431,22 @@ src/
     youtube_consts.rs  client name, client version, endpoint paths
   throttle.rs        delay, jitter, batch pause, backoff, circuit breaker
   error.rs           FetchError and classification
-  store.rs           manifest, atomic writes, Markdown and JSON output
+  store.rs           manifest, atomic writes, Markdown output
 ```
 
 ## 11. Implementation phases
 
 ### Phase 0: spike (live, minimum requests)
 
-1. Send one request to check that the IP block has stopped. If it has not stopped, use a proxy or
-   wait.
-2. Run the `yt-dlp` list command on one channel. Save the output as a test fixture.
+1. Send one request to check that the IP block has stopped. If it has not stopped, wait.
+2. Run the `yt-dlp` list command on the target channel. Save the output as a test fixture.
 3. Fetch the transcript of one video with the `innertube` method. Save the player response and
-   the `json3` response as test fixtures.
-4. Examine `yt-transcript-rs`. Decide: use it, or write our own module.
-5. Get one HTTP 429 response body, or a "not a bot" response, as a fixture if possible. If not,
+   the `json3` response as test fixtures. Use a video that has an auto-generated track and a
+   manual track, if possible.
+4. Run `yt-dlp -J` on the same video. Save the output as a fixture. Find how `yt-dlp` marks the
+   original auto-generated track (section 6.4).
+5. Examine `yt-transcript-rs`. Decide: use it, or write our own module.
+6. Get one HTTP 429 response body, or a "not a bot" response, as a fixture if possible. If not,
    make fixtures from the `youtube-transcript-api` source code.
 
 Send no more than 10 requests in this phase.
@@ -409,7 +460,7 @@ Send no more than 10 requests in this phase.
 ### Phase 2: transcript fetch and storage
 
 - `transcript/innertube.rs`, track selection, `json3` parser.
-- `store.rs`: Markdown, JSON, manifest, atomic writes, resume rules.
+- `store.rs`: Markdown output, manifest, atomic writes, resume rules.
 - Unit tests with the fixtures. Do not use the network in unit tests.
 
 ### Phase 3: throttle and circuit breaker
@@ -424,23 +475,25 @@ Send no more than 10 requests in this phase.
 
 - `--proxy` for `reqwest` and for the `yt-dlp` subprocess.
 - `transcript/ytdlp.rs`.
+- Test `--proxy` with a local proxy (for example `mitmproxy`), not with a paid proxy.
 
 ### Phase 5: real run
 
-- Run on a small channel with `--max-videos 5`.
-- Then run on the Skate IQ channel with default settings. Monitor the log.
-- Do a second run. Make sure that it sends no transcript requests for videos that are done.
+- Run on the target channel with `--max-videos 5`, without a proxy.
+- Then run on the full channel with the default settings. Monitor the log.
+- If YouTube blocks the run, wait one day and run again. Buy a proxy only if the block occurs
+  again and again (section 7.7).
+- Do a last run. Make sure that it sends no transcript requests for videos that are done.
 
 ### Later
 
-- Optional YouTube Data API v3 list backend (section 5).
 - Optional `--cookies` with a clear warning about the risk to the account.
 - A `search` subcommand over the stored transcripts.
 
 ## 12. Tests
 
-- Unit tests: track selection, `json3` parser, timestamp format, slug, error classification,
-  manifest resume rules.
+- Unit tests: track selection (all rules in section 6.3), `json3` parser, timestamp format, slug,
+  error classification, manifest resume rules.
 - Mock HTTP tests: all rows of the table in section 7.5.
 - One live test, marked `#[ignore]`. It fetches one transcript. Run it only by hand.
 - Do not add tests that send many live requests.
@@ -453,13 +506,14 @@ Send no more than 10 requests in this phase.
 | YouTube requires a PO token for transcript requests. | The `yt-dlp` backend gets updates for this. Monitor `youtube-transcript-api` issues. |
 | The block occurs even with the slow defaults. | The circuit breaker stops the run. The next run resumes. The user can increase `--delay` or use `--proxy`. |
 | `yt-dlp` is missing or old. | Check at start. Show the installed version in `--verbose`. |
-| A channel has thousands of videos. | Use `--max-videos` per run. Run again on following days. |
+| A video has no auto-generated track and many manual tracks. | Rule 3 in section 6.3 selects `--lang`. The log shows a warning. |
 
-## 14. Open questions
+## 14. Decisions
 
-1. Include past live streams by default, or only with `--include-streams`? (The plan: only with
-   the flag.)
-2. Which languages to prefer? (The plan: `en`, manual tracks before auto-generated tracks.)
-3. Is the output format correct (Markdown with timestamps, and JSON)?
-4. Do you have a proxy account, for example Webshare? If yes, the default delay can be shorter.
-5. Do you want the YouTube Data API list backend in the first version?
+| Question | Decision |
+| --- | --- |
+| Live streams | Ignore them. There is no option to include them. |
+| Language | The original language of the video. If the original language is not clear, English. |
+| Output format | Markdown only, with a timestamp on each line. |
+| Proxy | None at first. If necessary, a Webshare Rotating Residential package (1 GB). The free plan is not sufficient. |
+| YouTube Data API | Not used. The user does not own the channel, so the captions API cannot give transcripts. |
