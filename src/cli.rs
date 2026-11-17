@@ -20,9 +20,25 @@ pub(crate) struct Cli {
     #[arg(short, long)]
     pub(crate) out: PathBuf,
 
+    /// Language to use when the original language of a video is not clear.
+    #[arg(long, default_value = "en")]
+    pub(crate) lang: String,
+
+    /// Base delay between transcript requests.
+    #[arg(long, default_value = "10s", value_parser = humantime::parse_duration)]
+    pub(crate) delay: Duration,
+
+    /// Stop after this number of videos in this run.
+    #[arg(long)]
+    pub(crate) max_videos: Option<usize>,
+
     /// Skip videos shorter than this duration (for example "2m").
     #[arg(long, value_parser = humantime::parse_duration)]
     pub(crate) min_duration: Option<Duration>,
+
+    /// Try again the videos that failed before with a temporary or unexpected error.
+    #[arg(long)]
+    pub(crate) retry_failed: bool,
 
     /// List the videos and the work to do. Send no transcript requests.
     #[arg(long)]
